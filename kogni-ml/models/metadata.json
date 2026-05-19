@@ -1,0 +1,43 @@
+{
+  "feature_cols": [
+    "iki_mean",
+    "iki_std",
+    "hold_mean",
+    "error_rate",
+    "key_count",
+    "scroll_velocity",
+    "direction_reversals",
+    "scroll_event_count",
+    "tab_switches",
+    "hour_of_day",
+    "day_of_week"
+  ],
+  "accuracy": 0.9983,
+  "precision": 0.9967,
+  "recall": 1.0,
+  "f1": 0.9983,
+  "roc_auc": 1.0,
+  "cv_auc_mean": 1.0,
+  "cv_auc_std": 0.0,
+  "feature_importance": {
+    "iki_mean": 0.037,
+    "iki_std": 0.0341,
+    "hold_mean": 0.0058,
+    "error_rate": 0.054,
+    "key_count": 0.0134,
+    "scroll_velocity": 0.1173,
+    "direction_reversals": 0.1035,
+    "scroll_event_count": 0.0246,
+    "tab_switches": 0.1515,
+    "hour_of_day": 0.0012,
+    "day_of_week": 0.0003
+  },
+  "top_3_features": [
+    "tab_switches",
+    "scroll_velocity",
+    "direction_reversals"
+  ],
+  "trained_on": "synthetic",
+  "n_train": 2400,
+  "n_test": 600
+}

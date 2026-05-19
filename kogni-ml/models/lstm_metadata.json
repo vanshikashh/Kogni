@@ -1,0 +1,20 @@
+{
+  "input_size": 11,
+  "hidden_size": 32,
+  "seq_len": 7,
+  "feature_cols": [
+    "iki_mean",
+    "iki_std",
+    "hold_mean",
+    "error_rate",
+    "key_count",
+    "scroll_velocity",
+    "direction_reversals",
+    "scroll_event_count",
+    "tab_switches",
+    "hour_of_day",
+    "day_of_week"
+  ],
+  "best_val_acc": 0.9083,
+  "backend": "numpy"
+}
