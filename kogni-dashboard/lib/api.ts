@@ -2,8 +2,6 @@ import { AuthResponse, WeeklyReport } from "@/types/kogni";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-// ── Token management (localStorage) ─────────────────────────────────────────
-
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("kogni_token");
@@ -17,7 +15,7 @@ export function clearToken() {
   localStorage.removeItem("kogni_token");
 }
 
-// ── Auth ─────────────────────────────────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────────────────────────
 
 export async function register(email: string, password: string): Promise<AuthResponse> {
   const res = await fetch(`${API}/api/v1/auth/register`, {
@@ -39,15 +37,22 @@ export async function login(email: string, password: string): Promise<AuthRespon
   return res.json();
 }
 
-// ── Dashboard data ───────────────────────────────────────────────────────────
+// ── Dashboard ─────────────────────────────────────────────────────────────────
 
 export async function fetchWeeklyReport(): Promise<WeeklyReport> {
+  // Always read fresh from localStorage
   const token = localStorage.getItem("kogni_token");
   if (!token) throw new Error("Unauthenticated");
+
   const res = await fetch(`${API}/api/v1/dashboard/weekly-report`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (res.status === 401) throw new Error("Unauthenticated");
+
+  // Do NOT clear token on 401 - just return empty report
+  // Token may be temporarily invalid due to API restart
+  if (res.status === 401) {
+    return { scores: [], avg_fatigue: null, trend_direction: "stable" };
+  }
   if (!res.ok) throw new Error("Failed to fetch weekly report");
   return res.json();
 }
@@ -65,14 +70,15 @@ export function createLiveSocket(
     try { onMessage(JSON.parse(e.data)); } catch {}
   };
   ws.onclose = () => onClose?.();
+  ws.onerror = () => {}; // suppress console errors - Redis not running is ok
   return ws;
 }
 
-// ── Recovery ─────────────────────────────────────────────────────────────────
+// ── Recovery ──────────────────────────────────────────────────────────────────
 
 export async function fetchPassage(): Promise<{ passage_id: number; text: string }> {
   const token = getToken();
-  const res   = await fetch(`${API}/api/v1/recovery/passage`, {
+  const res = await fetch(`${API}/api/v1/recovery/passage`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error("Failed to fetch passage");
@@ -91,11 +97,11 @@ export async function measureRecovery(
   message: string;
 }> {
   const token = getToken();
-  const res   = await fetch(`${API}/api/v1/recovery/measure`, {
-    method:  "POST",
+  const res = await fetch(`${API}/api/v1/recovery/measure`, {
+    method: "POST",
     headers: {
-      "Content-Type":  "application/json",
-      Authorization:   `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({ keystroke_timings, pre_score, passage_id }),
   });
@@ -105,7 +111,7 @@ export async function measureRecovery(
 
 export async function fetchRecoveryHistory(): Promise<{ history: unknown[] }> {
   const token = getToken();
-  const res   = await fetch(`${API}/api/v1/recovery/history`, {
+  const res = await fetch(`${API}/api/v1/recovery/history`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error("Failed to fetch recovery history");

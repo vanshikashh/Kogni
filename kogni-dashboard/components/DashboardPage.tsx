@@ -112,9 +112,19 @@ export function DashboardPage({ onLogout }: { onLogout: () => void }) {
     return () => clearInterval(t);
   }, []);
 
-  const score  = liveScore?.fatigue_score ?? null;
-  const status = liveScore?.status ?? "nominal";
-  const shap: ShapDriver[]  = liveScore?.shap_top3 ?? [];
+  // Use latest score from weekly report as fallback when WebSocket unavailable
+  const latestScore = report?.scores?.filter(s => s.fatigue_score != null).slice(-1)[0];
+  const score  = liveScore?.fatigue_score ?? latestScore?.fatigue_score ?? null;
+  const status = (liveScore?.status ?? (score && score > 0.7 ? "high" : score && score > 0.4 ? "moderate" : "nominal")) as FatigueStatus;
+  // Pull SHAP from weekly report latest score (works without WebSocket)
+  const shapSource = latestScore ?? report?.scores?.slice(-1)[0];
+  const shap: ShapDriver[] = liveScore?.shap_top3 ?? (
+    shapSource?.shap_feature_1 ? [
+      { feature: shapSource.shap_feature_1 ?? "", label: shapSource.shap_feature_1?.replace("_"," ") ?? "", shap_value: shapSource.shap_value_1 ?? 0, direction: (shapSource.shap_value_1 ?? 0) > 0 ? "increases_fatigue" : "reduces_fatigue" },
+      ...(shapSource.shap_feature_2 ? [{ feature: shapSource.shap_feature_2, label: shapSource.shap_feature_2.replace("_"," "), shap_value: shapSource.shap_value_2 ?? 0, direction: ((shapSource.shap_value_2 ?? 0) > 0 ? "increases_fatigue" : "reduces_fatigue") as "increases_fatigue" | "reduces_fatigue" }] : []),
+      ...(shapSource.shap_feature_3 ? [{ feature: shapSource.shap_feature_3, label: shapSource.shap_feature_3.replace("_"," "), shap_value: shapSource.shap_value_3 ?? 0, direction: ((shapSource.shap_value_3 ?? 0) > 0 ? "increases_fatigue" : "reduces_fatigue") as "increases_fatigue" | "reduces_fatigue" }] : []),
+    ] : []
+  );
   const scores = report?.scores ?? [];
 
   const MetricCard = ({ icon, label, value, unit, delta, deltaDir }: {

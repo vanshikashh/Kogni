@@ -1,46 +1,49 @@
 /**
- * Kogni Background Service Worker
+ * Kogni Background Service Worker — Fixed
  *
- * Responsibilities:
- *  - Receive feature vectors from content scripts
- *  - Track tab switch frequency (cross-tab signal)
- *  - Batch vectors and flush to the Kogni API
- *  - Store JWT token securely in chrome.storage.local
- *  - Update extension badge with latest fatigue score
+ * Fixes:
+ * 1. Never auto-delete token on 401 (was causing token wipe loop)
+ * 2. chrome.alarms.create inside onInstalled for MV3 reliability
+ * 3. Better error logging so you can see what's happening
  */
 
-const API_BASE = "http://localhost:8000"; // swap to https://api.kogni.app in prod
-const FLUSH_INTERVAL_MS = 60_000;         // flush batch every 60 seconds
-const MAX_BATCH_SIZE = 10;
+const API_BASE        = "http://localhost:8000";
+const FLUSH_INTERVAL  = 1;       // minutes
+const MAX_BATCH_SIZE  = 10;
 
-// ─── In-memory state ─────────────────────────────────────────────────────────
+let vectorBatch          = [];
+let tabSwitchesInWindow  = 0;
+let currentFatigueScore  = null;
 
-let vectorBatch = [];
-let tabSwitchCount = 0;
-let lastTabSwitchTs = Date.now();
-let tabSwitchesInWindow = 0;
-
-// ─── Tab switch tracking ──────────────────────────────────────────────────────
-
+// ── Tab switch tracking ───────────────────────────────────
 chrome.tabs.onActivated.addListener(() => {
-  tabSwitchCount++;
   tabSwitchesInWindow++;
 });
 
-// ─── Message handler (from content scripts) ───────────────────────────────────
+// ── Setup alarm on install (MV3 best practice) ────────────
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.alarms.create("kogni-flush", { periodInMinutes: FLUSH_INTERVAL });
+  console.log("[Kogni] Installed. Flush alarm created.");
+});
 
+// Also create alarm on startup in case service worker restarts
+chrome.alarms.get("kogni-flush", (alarm) => {
+  if (!alarm) {
+    chrome.alarms.create("kogni-flush", { periodInMinutes: FLUSH_INTERVAL });
+  }
+});
+
+// ── Message handler ───────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "FEATURE_VECTOR") {
     const vector = {
       ...message.payload,
       tab_switches: tabSwitchesInWindow,
     };
-
-    tabSwitchesInWindow = 0; // reset window count after attaching
-
+    tabSwitchesInWindow = 0;
     vectorBatch.push(vector);
+    console.log("[Kogni] Vector received. Batch size:", vectorBatch.length);
 
-    // Flush early if batch is full
     if (vectorBatch.length >= MAX_BATCH_SIZE) {
       flushBatch();
     }
@@ -48,102 +51,86 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "GET_BADGE_STATE") {
     sendResponse({ score: currentFatigueScore });
-  }
-
-  if (message.type === "SET_TOKEN") {
-    chrome.storage.local.set({ kogni_token: message.token });
-  }
-
-  if (message.type === "CLEAR_TOKEN") {
-    chrome.storage.local.remove("kogni_token");
-    updateBadge(null);
+    return true;
   }
 });
 
-// ─── Batch flush ──────────────────────────────────────────────────────────────
-
+// ── Flush batch to API ────────────────────────────────────
 async function flushBatch() {
-  if (vectorBatch.length === 0) return;
+  if (vectorBatch.length === 0) {
+    console.log("[Kogni] Nothing to flush.");
+    return;
+  }
 
   const token = await getToken();
-  if (!token) return; // not authenticated, drop batch silently
+  if (!token) {
+    console.warn("[Kogni] No token set — skipping flush. Set token via service worker console.");
+    return;
+  }
 
-  const batch = [...vectorBatch];
-  vectorBatch = []; // clear before await so new vectors aren't lost
+  const batch   = [...vectorBatch];
+  vectorBatch   = [];
+
+  console.log(`[Kogni] Flushing ${batch.length} vectors...`);
 
   try {
     const res = await fetch(`${API_BASE}/api/v1/events/ingest`, {
-      method: "POST",
+      method:  "POST",
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type":  "application/json",
         "Authorization": `Bearer ${token}`,
       },
       body: JSON.stringify({ vectors: batch }),
     });
 
     if (res.status === 401) {
-      // Token expired — clear it, user needs to re-auth
-      chrome.storage.local.remove("kogni_token");
-      updateBadge(null);
+      // ✅ FIXED: Do NOT clear token on 401.
+      // Token may be temporarily invalid due to API restart.
+      // Just log and keep the token so user doesn't have to reset it.
+      console.error("[Kogni] 401 Unauthorized. Check if API is running and token is current.");
+      vectorBatch = [...batch, ...vectorBatch]; // restore batch
       return;
     }
 
     if (res.ok) {
       const data = await res.json();
-      // API may return latest fatigue score with ingestion response
-      if (data.fatigue_score !== undefined) {
+      console.log(`[Kogni] Flush OK. Accepted: ${data.accepted}. Total: ${data.total_vectors}`);
+      if (data.fatigue_score != null) {
         updateBadge(data.fatigue_score);
       }
+    } else {
+      console.error("[Kogni] Flush failed:", res.status, res.statusText);
+      vectorBatch = [...batch, ...vectorBatch];
     }
+
   } catch (err) {
-    // Network error — put batch back (prepend to preserve order)
+    console.error("[Kogni] Network error:", err.message);
     vectorBatch = [...batch, ...vectorBatch];
-    console.error("[Kogni] Flush failed:", err.message);
   }
 }
 
-// ─── Badge management ─────────────────────────────────────────────────────────
-
-let currentFatigueScore = null;
-
-function updateBadge(score) {
-  currentFatigueScore = score;
-
-  if (score === null) {
-    chrome.action.setBadgeText({ text: "" });
-    return;
-  }
-
-  // Score is 0–1. Thresholds: green < 0.4, amber < 0.7, red >= 0.7
-  let color, label;
-
-  if (score < 0.4) {
-    color = "#1D9E75";  // teal — good
-    label = "OK";
-  } else if (score < 0.7) {
-    color = "#EF9F27";  // amber — moderate fatigue
-    label = "~";
-  } else {
-    color = "#E24B4A";  // red — high fatigue
-    label = "!";
-  }
-
-  chrome.action.setBadgeBackgroundColor({ color });
-  chrome.action.setBadgeText({ text: label });
-}
-
-// ─── Scheduled flush via alarms ───────────────────────────────────────────────
-
-chrome.alarms.create("kogni-flush", { periodInMinutes: 1 });
-
+// ── Alarm handler ─────────────────────────────────────────
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "kogni-flush") {
+    console.log("[Kogni] Alarm fired — flushing...");
     flushBatch();
   }
 });
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ── Badge ─────────────────────────────────────────────────
+function updateBadge(score) {
+  currentFatigueScore = score;
+  if (score === null) {
+    chrome.action.setBadgeText({ text: "" });
+    return;
+  }
+  const color = score < 0.4 ? "#1D9E75" : score < 0.7 ? "#EF9F27" : "#E24B4A";
+  const label = score < 0.4 ? "OK"       : score < 0.7 ? "~"       : "!";
+  chrome.action.setBadgeBackgroundColor({ color });
+  chrome.action.setBadgeText({ text: label });
+}
 
+// ── Token helper ──────────────────────────────────────────
 function getToken() {
   return new Promise((resolve) => {
     chrome.storage.local.get("kogni_token", (result) => {
