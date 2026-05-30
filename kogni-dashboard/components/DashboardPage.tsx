@@ -91,7 +91,7 @@ export function DashboardPage({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     loadReport();
     // Refresh every 5 minutes
-    const t = setInterval(loadReport, 5 * 60 * 1000);
+    const t = setInterval(loadReport, 2 * 60 * 1000);
     return () => clearInterval(t);
   }, [loadReport]);
 

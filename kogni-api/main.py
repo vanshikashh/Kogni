@@ -196,7 +196,65 @@ def ingest(body: IngestBody,
     ]
     db.bulk_save_objects(rows); db.commit()
     total = db.query(FeatureVector).filter(FeatureVector.user_id == user.id).count()
-    return {"accepted": len(rows), "total_vectors": total, "fatigue_score": None}
+
+    # Auto-score every 20 vectors (about 10 minutes of browsing)
+    fatigue_score = None
+    if total % 20 == 0 and total > 0:
+        try:
+            import sys, os
+            ml_path = os.path.join(os.path.dirname(__file__), "..", "kogni-ml")
+            if ml_path not in sys.path:
+                sys.path.insert(0, ml_path)
+            from inference import score_vector
+            row = db.execute(text("""
+                SELECT AVG(iki_mean),AVG(iki_std),AVG(hold_mean),AVG(error_rate),
+                       AVG(key_count),AVG(scroll_velocity),AVG(direction_reversals),
+                       AVG(scroll_event_count),AVG(tab_switches),AVG(hour_of_day),AVG(day_of_week)
+                FROM feature_vectors WHERE user_id=:uid AND key_count>0
+            """), {"uid": user.id}).fetchone()
+            if row and row[0]:
+                cols = ["iki_mean","iki_std","hold_mean","error_rate","key_count",
+                        "scroll_velocity","direction_reversals","scroll_event_count",
+                        "tab_switches","hour_of_day","day_of_week"]
+                vec = {c: float(row[i] or 0) for i,c in enumerate(cols)}
+                rf  = score_vector(vec)
+                fatigue_score = rf["fatigue_score"]
+                shap = rf["shap_top3"]
+                today = datetime.now(timezone.utc).date()
+                existing = db.execute(text(
+                    "SELECT id FROM daily_scores WHERE user_id=:uid AND date(date)=:today"
+                ), {"uid": user.id, "today": str(today)}).fetchone()
+                params = {
+                    "uid": user.id, "today": str(today),
+                    "date": datetime.now(timezone.utc).isoformat(),
+                    "fs": fatigue_score, "ts": None,
+                    "f1": shap[0]["feature"] if len(shap)>0 else None,
+                    "v1": shap[0]["shap_value"] if len(shap)>0 else None,
+                    "f2": shap[1]["feature"] if len(shap)>1 else None,
+                    "v2": shap[1]["shap_value"] if len(shap)>1 else None,
+                    "f3": shap[2]["feature"] if len(shap)>2 else None,
+                    "v3": shap[2]["shap_value"] if len(shap)>2 else None,
+                }
+                if existing:
+                    db.execute(text("""
+                        UPDATE daily_scores SET fatigue_score=:fs,date=:date,
+                        shap_feature_1=:f1,shap_value_1=:v1,
+                        shap_feature_2=:f2,shap_value_2=:v2,
+                        shap_feature_3=:f3,shap_value_3=:v3
+                        WHERE user_id=:uid AND date(date)=:today
+                    """), params)
+                else:
+                    db.execute(text("""
+                        INSERT INTO daily_scores (user_id,date,fatigue_score,trajectory_score,
+                        shap_feature_1,shap_value_1,shap_feature_2,shap_value_2,
+                        shap_feature_3,shap_value_3)
+                        VALUES (:uid,:date,:fs,:ts,:f1,:v1,:f2,:v2,:f3,:v3)
+                    """), params)
+                db.commit()
+        except Exception:
+            pass  # Scoring is best-effort — never block ingestion
+
+    return {"accepted": len(rows), "total_vectors": total, "fatigue_score": fatigue_score}
 
 # ── Dashboard ─────────────────────────────────────────────
 @app.get("/api/v1/dashboard/weekly-report")
